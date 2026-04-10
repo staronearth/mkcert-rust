@@ -10,3 +10,4 @@ rcgen = { version = "0.14.7", default-features = false, features = ["aws_lc_rs",
 dirs = "6.0"
 anyhow = "1.0"
 pem = "3.0"
+time = "0.3"
