@@ -323,15 +323,24 @@ fn install_nss_browsers(cert_path: &Path) -> Result<()> {
     }
 
     for db in nss_dbs {
-        println!("Installing into NSS database: {}", db.display());
+        println!("Updating NSS database: {}", db.display());
         let db_arg = format!("sql:{}", db.display());
+        
+        // 1. Try to delete the old certificate if it exists
+        let _ = Command::new("certutil")
+            .args(&["-d", &db_arg, "-D", "-n", "mkcert-rust-ca"])
+            .status();
+
+        // 2. Add the new certificate
         let status = Command::new("certutil")
-            .args(&["-d", &db_arg, "-A", "-t", "C,,", "-n", "mkcert-rust-ca", "-i", cert_path.to_str().unwrap()])
+            .args(&["-d", &db_arg, "-A", "-t", "CT,C,C", "-n", "mkcert-rust-ca", "-i", cert_path.to_str().unwrap()])
             .status();
         
         if let Ok(s) = status {
             if !s.success() {
-                println!("Failed to install in {}", db.display());
+                println!("Warning: Failed to install in {}. Please ensure the browser is closed and you have sufficient permissions.", db.display());
+            } else {
+                println!("Successfully updated {}", db.display());
             }
         }
     }
