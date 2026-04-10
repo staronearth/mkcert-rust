@@ -5,20 +5,26 @@ use rcgen::{
     PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519, PKCS_ML_DSA_44, PKCS_ML_DSA_65,
     PKCS_ML_DSA_87, SignatureAlgorithm,
 };
+use std::env;
 use std::fs;
 use std::net::IpAddr;
-use std::path::{Path};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Domain names or IP addresses for which to generate a certificate.
-    #[arg(required_unless_present = "install")]
+    #[arg(required_unless_present_any = ["install", "install_rootca"])]
     domains: Vec<String>,
 
     /// Generate the Root CA if it doesn't exist.
     #[arg(long)]
     install: bool,
+
+    /// Install a Root CA certificate into the system and browser trust stores.
+    #[arg(long, value_name = "FILE")]
+    install_rootca: Option<PathBuf>,
 
     /// Common Name for the Issuer (CA).
     #[arg(long, default_value = "mkcert-rust development CA")]
@@ -77,6 +83,10 @@ impl Algorithm {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(rootca_path) = &args.install_rootca {
+        return install_root_ca(rootca_path);
+    }
 
     let ca_dir = dirs::data_local_dir()
         .context("Could not determine local data directory")?
@@ -197,6 +207,134 @@ fn generate_cert(args: &Args, ca_cert_path: &Path, ca_key_path: &Path) -> Result
         println!(" - {}", domain);
     }
     println!("\nThe certificate is at \"{}\" and the key at \"{}\" \u{2728}\n", cert_out, key_out);
+
+    Ok(())
+}
+
+fn install_root_ca(cert_path: &Path) -> Result<()> {
+    if !cert_path.exists() {
+        return Err(anyhow::anyhow!("Certificate file not found: {}", cert_path.display()));
+    }
+
+    let os = env::consts::OS;
+    println!("Detected OS: {}", os);
+
+    match os {
+        "linux" => install_linux(cert_path)?,
+        "macos" => install_macos(cert_path)?,
+        "windows" => install_windows(cert_path)?,
+        _ => println!("Unsupported OS for automatic system trust store installation: {}", os),
+    }
+
+    install_nss_browsers(cert_path)?;
+
+    println!("Root CA installation complete.");
+    Ok(())
+}
+
+fn install_linux(cert_path: &Path) -> Result<()> {
+    println!("Installing to Linux system trust store (requires sudo)...");
+    if Path::new("/usr/local/share/ca-certificates/").exists() {
+        let target = "/usr/local/share/ca-certificates/mkcert-rust-ca.crt";
+        run_sudo(&["cp", cert_path.to_str().unwrap(), target])?;
+        run_sudo(&["update-ca-certificates"])?;
+    } else if Path::new("/etc/pki/ca-trust/source/anchors/").exists() {
+        let target = "/etc/pki/ca-trust/source/anchors/mkcert-rust-ca.crt";
+        run_sudo(&["cp", cert_path.to_str().unwrap(), target])?;
+        run_sudo(&["update-ca-trust", "extract"])?;
+    } else if Path::new("/etc/ca-certificates/trust-source/anchors/").exists() {
+        let target = "/etc/ca-certificates/trust-source/anchors/mkcert-rust-ca.crt";
+        run_sudo(&["cp", cert_path.to_str().unwrap(), target])?;
+        run_sudo(&["trust", "extract-compat"])?;
+    } else {
+        println!("Could not determine Linux distribution for system trust store.");
+    }
+    Ok(())
+}
+
+fn install_macos(cert_path: &Path) -> Result<()> {
+    println!("Installing to macOS System Keychain (requires sudo)...");
+    run_sudo(&["security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", cert_path.to_str().unwrap()])?;
+    Ok(())
+}
+
+fn install_windows(cert_path: &Path) -> Result<()> {
+    println!("Installing to Windows system trust store...");
+    let status = Command::new("certutil")
+        .args(&["-addstore", "-user", "root", cert_path.to_str().unwrap()])
+        .status()?;
+    if !status.success() {
+        println!("Failed to install on Windows.");
+    }
+    Ok(())
+}
+
+fn run_sudo(args: &[&str]) -> Result<()> {
+    let status = Command::new("sudo")
+        .args(args)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("sudo command failed: {:?}", args));
+    }
+    Ok(())
+}
+
+fn install_nss_browsers(cert_path: &Path) -> Result<()> {
+    println!("Checking for NSS databases (Firefox, Chrome, Edge)...");
+    if Command::new("certutil").arg("-H").output().is_err() {
+        println!("'certutil' command not found. Skipping Firefox/Chrome NSS installation.");
+        println!("To install it on Linux: sudo apt install libnss3-tools");
+        println!("To install it on macOS: brew install nss");
+        return Ok(());
+    }
+
+    let mut nss_dbs = Vec::new();
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // Chrome/Edge/Brave on Linux
+    let pki_nssdb = home.join(".pki/nssdb");
+    if pki_nssdb.exists() {
+        nss_dbs.push(pki_nssdb);
+    }
+
+    // Firefox on Linux/macOS
+    let firefox_paths = vec![
+        home.join(".mozilla/firefox"),
+        home.join("snap/firefox/common/.mozilla/firefox"),
+        home.join("Library/Application Support/Firefox/Profiles"),
+    ];
+
+    for base in firefox_paths {
+        if base.exists() {
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && (path.join("cert9.db").exists() || path.join("cert8.db").exists()) {
+                        nss_dbs.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    if nss_dbs.is_empty() {
+        println!("No NSS databases found.");
+        return Ok(());
+    }
+
+    for db in nss_dbs {
+        println!("Installing into NSS database: {}", db.display());
+        let db_arg = format!("sql:{}", db.display());
+        let status = Command::new("certutil")
+            .args(&["-d", &db_arg, "-A", "-t", "C,,", "-n", "mkcert-rust-ca", "-i", cert_path.to_str().unwrap()])
+            .status();
+        
+        if let Ok(s) = status {
+            if !s.success() {
+                println!("Failed to install in {}", db.display());
+            }
+        }
+    }
 
     Ok(())
 }

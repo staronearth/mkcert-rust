@@ -52,6 +52,14 @@ cargo build --release
 ```
 *注意：Root CA 文件存储在系统本地数据目录（如 Linux 上的 `~/.local/share/mkcert-rust/`）。*
 
+**自动安装到系统和浏览器信任库：**
+你可以使用 `--install-rootca` 命令尝试将生成的 Root CA 自动安装到当前操作系统的信任库以及浏览器（Firefox, Chrome 等）的 NSS 数据库中。
+```bash
+# 将刚刚生成的 Root CA 安装到系统和浏览器
+./target/release/mkcert-rust --install-rootca ~/.local/share/mkcert-rust/rootCA.pem
+```
+*(注意：此命令可能需要 `sudo` 权限，且在 Linux/macOS 浏览器安装时依赖 `certutil` 工具)*
+
 ### 2. 生成域名证书
 ```bash
 # 生成普通域名证书
