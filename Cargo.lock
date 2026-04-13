@@ -377,6 +377,7 @@ dependencies = [
  "dirs",
  "pem",
  "rcgen",
+ "time",
 ]
 
 [[package]]
